@@ -60,7 +60,9 @@ class Autoregressive(Distribution):
         self.init = initial_state
         self.n_length = n_length
         self.n_classes = n_classes
+        assert start_class != end_class, "Start and end classes should be different "
         self.start_class = start_class
+        self.end_class = end_class
         self.normalize = normalize
         event_shape = (n_length, n_classes)
         batch_shape = initial_state[0].shape[:1]
@@ -105,7 +107,8 @@ class Autoregressive(Distribution):
         b2, n2, c2 = logits.shape
         assert (
             (b2 == sample * batch_shape)
-            and (n2 == n_length + 1)
+            and (n2 == n_length + 1) if self.end_class is None else True
+            and (n2 <= n_length + 1) if self.end_class is not None else True
             and (c2 == self.n_classes)
         ), "Model should return logits of shape `batch x N x C` "
 
@@ -148,6 +151,7 @@ class Autoregressive(Distribution):
         state = tuple(
             (unwrap(i.unsqueeze(0).expand((ssize,) + i.shape)) for i in self.init)
         )
+        alive = torch.ones((ssize, self.batch_shape[0]), dtype=torch.bool) if self.end_class is not None else None
 
         # Beam Search
         all_beams = []
@@ -177,6 +181,10 @@ class Autoregressive(Distribution):
             all_beams.append(ex_beam)
             beam, (positions, tokens) = semiring.sparse_sum(ex_beam)
             state = take(state, positions)
+            if self.end_class is not None:
+                alive *= tokens != self.end_class
+                if not torch.any(alive):
+                    break
 
         # Back pointers
         v = beam
@@ -279,10 +287,15 @@ class Autoregressive(Distribution):
             .long()
             .fill_(self.start_class)
         )
+        alive = torch.ones(sample_shape * self.batch_shape[0], dtype=torch.bool) if self.end_class is not None else None
         for t in range(0, self.n_length):
             logits, state = self.model(tokens.unsqueeze(-1), state)
             logits = logits.squeeze(1)
             tokens = torch.distributions.Categorical(logits=logits).sample((1,))[0]
             all_tokens.append(tokens)
+            if self.end_class is not None:
+                alive *= tokens != self.end_class
+                if not torch.any(alive):
+                    break
         v = wrap(torch.stack(all_tokens, dim=1), sample_shape)
         return torch.nn.functional.one_hot(v, self.n_classes)
